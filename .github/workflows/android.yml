@@ -1,0 +1,103 @@
+name: Build BTC Watch Standalone APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # Supports either normal project files, a nested source folder,
+      # or a single OneUpload ZIP uploaded directly through GitHub Web.
+      - name: Locate or unpack Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Files at repository root:'
+          ls -la
+
+          if [[ -f settings.gradle || -f settings.gradle.kts ]]; then
+            echo 'Gradle project found at repository root.'
+          else
+            project_file="$(find . -mindepth 2 -maxdepth 5 -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print -quit)"
+            if [[ -n "$project_file" ]]; then
+              project_dir="$(dirname "$project_file")"
+              echo "Copying nested project from: $project_dir"
+              cp -a "$project_dir/." "$GITHUB_WORKSPACE/"
+            else
+              archive="$(find . -maxdepth 1 -type f \( -iname '*OneUpload.zip' -o -iname '*.zip' \) -print | sort -V | tail -n 1)"
+              if [[ -z "$archive" ]]; then
+                echo 'ERROR: No Gradle project and no source ZIP found in repository.' >&2
+                echo 'Upload BTC-Market-Clock-Watch-Standalone-V3-OneUpload.zip to the repository root.' >&2
+                exit 1
+              fi
+              echo "Unpacking source archive: $archive"
+              mkdir -p "$RUNNER_TEMP/marketclock-source"
+              unzip -q "$archive" -d "$RUNNER_TEMP/marketclock-source"
+              project_file="$(find "$RUNNER_TEMP/marketclock-source" -maxdepth 6 -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print -quit)"
+              if [[ -z "$project_file" ]]; then
+                echo 'ERROR: Source ZIP does not contain settings.gradle or settings.gradle.kts.' >&2
+                exit 1
+              fi
+              project_dir="$(dirname "$project_file")"
+              echo "Copying Gradle source from: $project_dir"
+              cp -a "$project_dir/." "$GITHUB_WORKSPACE/"
+            fi
+          fi
+          echo 'Checking Android project files:'
+          ls -l settings.gradle* build.gradle* wear/build.gradle
+          test -f wear/build.gradle
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Verify Android SDK (API 35)
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          missing=()
+          if [[ ! -f "$SDK_ROOT/platforms/android-35/android.jar" ]]; then
+            missing+=("platforms;android-35")
+          fi
+          if [[ ! -d "$SDK_ROOT/build-tools/35.0.0" ]]; then
+            missing+=("build-tools;35.0.0")
+          fi
+          if (( ${#missing[@]} > 0 )); then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+            if [[ ! -x "$SDKMANAGER" ]]; then
+              echo "ERROR: sdkmanager not found at $SDKMANAGER" >&2
+              exit 1
+            fi
+            "$SDKMANAGER" --sdk_root="$SDK_ROOT" "${missing[@]}"
+          fi
+          test -f "$SDK_ROOT/platforms/android-35/android.jar"
+          test -d "$SDK_ROOT/build-tools/35.0.0"
+
+      - name: Set up Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Build watch debug APK
+        run: gradle :wear:assembleDebug --no-daemon --stacktrace
+
+      - name: Upload Wear OS APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BTC-MarketClock-Watch-Standalone-Debug
+          path: wear/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
